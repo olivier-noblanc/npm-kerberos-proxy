@@ -1,0 +1,6 @@
+Ce depot embarque (via la CI, dans les artefacts publies sous Releases)
+le binaire natif prebuilt de kerberos (https://github.com/mongodb-js/kerberos),
+sous licence Apache License 2.0.
+
+Copyright kerberos contributors.
+Voir https://github.com/mongodb-js/kerberos/blob/main/LICENSE.md

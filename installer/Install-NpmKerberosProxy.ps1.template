@@ -1,0 +1,223 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  Installe un agent de proxy Kerberos/Negotiate pour npm sur Windows.
+.DESCRIPTION
+  npm (via @npmcli/agent) ne supporte nativement que l'authentification
+  proxy Basic. Ce script patche l'installation npm locale pour utiliser
+  un agent supportant Negotiate/Kerberos via SSPI, avec detection
+  automatique du type d'authentification requis par le proxy configure.
+  100% hors-ligne : aucun acces reseau necessaire pour installer.
+
+  Projet : https://github.com/OWNER/npm-kerberos-proxy
+  Build   : __BUILD_ARCH__ / kerberos __KERBEROS_VERSION__ / genere le __BUILD_DATE__
+.PARAMETER NpmPath
+  Chemin vers le dossier npm a patcher. Auto-detecte si omis (nvm-windows,
+  puis installation Node globale standard).
+.PARAMETER Uninstall
+  Restaure la version d'origine de proxy.js depuis la sauvegarde.
+.PARAMETER Force
+  Applique le patch meme si la version de @npmcli/agent n'a pas ete testee.
+.EXAMPLE
+  .\Install-NpmKerberosProxy-win32-x64.ps1
+.EXAMPLE
+  .\Install-NpmKerberosProxy-win32-x64.ps1 -Uninstall
+#>
+[CmdletBinding()]
+param(
+    [string]$NpmPath,
+    [switch]$Uninstall,
+    [switch]$Force
+)
+
+$ErrorActionPreference = 'Stop'
+$ScriptArch = '__BUILD_ARCH__'
+$LogFile = Join-Path $env:TEMP "npm-kerberos-proxy-install.log"
+
+function Write-Log {
+    param([string]$Message, [string]$Level = 'INFO')
+    $line = "[{0}] [{1}] {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+    Add-Content -Path $LogFile -Value $line
+    switch ($Level) {
+        'ERROR' { Write-Host $line -ForegroundColor Red }
+        'WARN'  { Write-Host $line -ForegroundColor Yellow }
+        'OK'    { Write-Host $line -ForegroundColor Green }
+        default { Write-Host $line }
+    }
+}
+
+function Assert-SupportedArch {
+    $procArch = $env:PROCESSOR_ARCHITECTURE
+    $expected = if ($ScriptArch -eq 'x64') { 'AMD64' } else { 'ARM64' }
+    if ($procArch -ne $expected -and -not $Force) {
+        throw "Ce build est compile pour $ScriptArch (attendu PROCESSOR_ARCHITECTURE=$expected, detecte $procArch). Utilise le build correspondant a ton architecture, ou -Force pour ignorer."
+    }
+}
+
+function Find-NpmInstall {
+    if ($NpmPath) {
+        if (Test-Path (Join-Path $NpmPath 'node_modules\@npmcli\agent\lib\proxy.js')) {
+            return $NpmPath
+        }
+        throw "NpmPath fourni ($NpmPath) ne contient pas node_modules\@npmcli\agent\lib\proxy.js"
+    }
+
+    $candidates = @()
+    if ($env:NVM_SYMLINK) { $candidates += $env:NVM_SYMLINK }
+    $candidates += 'C:\nvm4w\nodejs'
+
+    foreach ($c in $candidates) {
+        if (Test-Path $c) {
+            try {
+                $item = Get-Item $c
+                $resolved = $item.Target
+                if ($resolved) {
+                    $npm = Join-Path $resolved 'node_modules\npm'
+                    if (Test-Path (Join-Path $npm 'node_modules\@npmcli\agent\lib\proxy.js')) {
+                        return $npm
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    try {
+        $npmRoot = (& npm root -g 2>$null)
+        if ($npmRoot) {
+            $parent = Split-Path $npmRoot -Parent
+            $npm = Join-Path $parent 'npm'
+            if (Test-Path (Join-Path $npm 'node_modules\@npmcli\agent\lib\proxy.js')) {
+                return $npm
+            }
+        }
+    } catch {}
+
+    throw "Impossible de localiser une installation npm avec @npmcli/agent. Precise -NpmPath explicitement."
+}
+
+function Get-KerberosNodeBytes {
+    [Convert]::FromBase64String('__KERBEROS_NODE_B64__')
+}
+
+function Get-KerberosIndexJs {
+    [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__KERBEROS_INDEX_JS_B64__'))
+}
+
+function Get-KerberosUtilJs {
+    [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__KERBEROS_UTIL_JS_B64__'))
+}
+
+function Get-AgentJs {
+    [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__AGENT_JS_B64__'))
+}
+
+$MarkerComment = '// npm-kerberos-proxy-patch v1'
+
+$AnchorOld = "  if (protocol === 'https' || protocol === 'http') {`r`n    return [HttpProxyAgent, HttpsProxyAgent]`r`n  }"
+$AnchorOldLF = "  if (protocol === 'https' || protocol === 'http') {`n    return [HttpProxyAgent, HttpsProxyAgent]`n  }"
+
+$PatchBlock = @"
+  if (protocol === 'https' || protocol === 'http') {
+    $MarkerComment
+    try {
+      const KerberosProxyAgent = require('../../kerberos-proxy-agent')
+      return [KerberosProxyAgent, KerberosProxyAgent]
+    } catch (err) {
+      process.emitWarning('npm-kerberos-proxy: repli HttpsProxyAgent (' + err.message + ')')
+    }
+    return [HttpProxyAgent, HttpsProxyAgent]
+  }
+"@
+
+function Invoke-Install {
+    Assert-SupportedArch
+    $npm = Find-NpmInstall
+    Write-Log "npm detecte : $npm"
+
+    $proxyJsPath = Join-Path $npm 'node_modules\@npmcli\agent\lib\proxy.js'
+    $agentJsPath = Join-Path $npm 'node_modules\@npmcli\kerberos-proxy-agent.js'
+    $kerberosDir = Join-Path $npm 'node_modules\kerberos'
+
+    $current = Get-Content $proxyJsPath -Raw
+
+    if ($current.Contains($MarkerComment)) {
+        Write-Log "Deja installe (marqueur present). Rien a faire." 'OK'
+        return
+    }
+
+    $anchor = $null
+    if ($current.Contains($AnchorOld)) { $anchor = $AnchorOld }
+    elseif ($current.Contains($AnchorOldLF)) { $anchor = $AnchorOldLF }
+
+    if (-not $anchor -and -not $Force) {
+        $agentVersion = 'inconnue'
+        try {
+            $pkgPath = Join-Path $npm 'node_modules\@npmcli\agent\package.json'
+            $agentVersion = (Get-Content $pkgPath -Raw | ConvertFrom-Json).version
+        } catch {}
+        Write-Log "Structure de proxy.js non reconnue (version @npmcli/agent : $agentVersion). Abandon (utilise -Force pour forcer, aux risques et perils)." 'ERROR'
+        exit 1
+    }
+
+    $backupPath = "$proxyJsPath.orig"
+    if (-not (Test-Path $backupPath)) {
+        Copy-Item $proxyJsPath $backupPath
+        Write-Log "Sauvegarde creee : $backupPath"
+    }
+
+    if ($anchor) {
+        $patched = $current.Replace($anchor, $PatchBlock)
+    } else {
+        # -Force sans anchor reconnu : on ne peut pas patcher chirurgicalement,
+        # on abandonne quand meme plutot que de corrompre le fichier.
+        Write-Log "Aucun point d'ancrage reconnu meme avec -Force. Abandon sans modification." 'ERROR'
+        exit 1
+    }
+
+    Set-Content -Path $proxyJsPath -Value $patched -Encoding UTF8 -NoNewline
+    Write-Log "proxy.js patche."
+
+    Get-AgentJs | Set-Content -Path $agentJsPath -Encoding UTF8 -NoNewline
+    Write-Log "Agent Kerberos ecrit : $agentJsPath"
+
+    New-Item -ItemType Directory -Path (Join-Path $kerberosDir 'build\Release') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $kerberosDir 'lib') -Force | Out-Null
+
+    [IO.File]::WriteAllBytes((Join-Path $kerberosDir 'build\Release\kerberos.node'), (Get-KerberosNodeBytes))
+    Get-KerberosIndexJs | Set-Content -Path (Join-Path $kerberosDir 'lib\index.js') -Encoding UTF8 -NoNewline
+    Get-KerberosUtilJs  | Set-Content -Path (Join-Path $kerberosDir 'lib\util.js')  -Encoding UTF8 -NoNewline
+    '{"name":"kerberos","version":"__KERBEROS_VERSION__","main":"lib/index.js"}' |
+        Set-Content -Path (Join-Path $kerberosDir 'package.json') -Encoding UTF8 -NoNewline
+
+    Write-Log "Module kerberos deploye : $kerberosDir"
+    Write-Log "Installation terminee." 'OK'
+
+    try {
+        $pingOutput = & npm ping 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Verification : npm ping OK" 'OK'
+        } else {
+            Write-Log "Verification : npm ping a echoue (verifie si un proxy Kerberos est bien configure ici) : $pingOutput" 'WARN'
+        }
+    } catch {
+        Write-Log "npm ping n'a pas pu etre execute : $_" 'WARN'
+    }
+}
+
+function Invoke-Uninstall {
+    $npm = Find-NpmInstall
+    $proxyJsPath = Join-Path $npm 'node_modules\@npmcli\agent\lib\proxy.js'
+    $backupPath = "$proxyJsPath.orig"
+
+    if (-not (Test-Path $backupPath)) {
+        Write-Log "Aucune sauvegarde trouvee ($backupPath). Rien a restaurer." 'WARN'
+        return
+    }
+    Copy-Item $backupPath $proxyJsPath -Force
+    Remove-Item (Join-Path $npm 'node_modules\@npmcli\kerberos-proxy-agent.js') -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $npm 'node_modules\kerberos') -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Log "Desinstallation terminee, proxy.js restaure." 'OK'
+}
+
+Write-Log "=== npm-kerberos-proxy ($ScriptArch) $(if($Uninstall){'uninstall'}else{'install'}) ==="
+if ($Uninstall) { Invoke-Uninstall } else { Invoke-Install }
