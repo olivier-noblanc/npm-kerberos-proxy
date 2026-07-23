@@ -62,6 +62,7 @@ function Find-NpmInstall {
         throw "NpmPath fourni ($NpmPath) ne contient pas node_modules\@npmcli\agent\lib\proxy.js"
     }
 
+    # nvm-windows
     $candidates = @()
     if ($env:NVM_SYMLINK) { $candidates += $env:NVM_SYMLINK }
     $candidates += 'C:\nvm4w\nodejs'
@@ -81,14 +82,42 @@ function Find-NpmInstall {
         }
     }
 
+    # scoop : résout le lien symbolique current → version
+    try {
+        $npmExe = (Get-Command npm -ErrorAction SilentlyContinue).Source
+        if ($npmExe) {
+            $npmItem = Get-Item $npmExe -ErrorAction SilentlyContinue
+            # scoop crée des .cmd/.ps1 dans persist/nodejs/bin ou apps/nodejs/current/bin
+            $dir = $npmItem.Directory
+            while ($dir -and $dir.Name -ne 'nodejs') { $dir = $dir.Parent }
+            if ($dir) {
+                $resolved = (Get-Item $dir.FullName -ErrorAction SilentlyContinue).Target
+                if ($resolved) { $dir = Get-Item $resolved -ErrorAction SilentlyContinue }
+                if ($dir) {
+                    $npm = Join-Path $dir.FullName 'node_modules\npm'
+                    if (Test-Path (Join-Path $npm 'node_modules\@npmcli\agent\lib\proxy.js')) {
+                        return $npm
+                    }
+                }
+            }
+        }
+    } catch {}
+
+    # npm root -g : remonte du dossier node_modules pour trouver npm/node_modules/npm
     try {
         $npmRoot = (& npm root -g 2>$null)
-        if ($npmRoot) {
-            $parent = Split-Path $npmRoot -Parent
-            $npm = Join-Path $parent 'npm'
-            if (Test-Path (Join-Path $npm 'node_modules\@npmcli\agent\lib\proxy.js')) {
-                return $npm
+        if ($npmRoot -and (Test-Path $npmRoot)) {
+            # Cherche @npmcli/agent en remontant depuis node_modules global
+            $agentPath = Join-Path $npmRoot 'npm\node_modules\@npmcli\agent\lib\proxy.js'
+            if (Test-Path $agentPath) {
+                return Join-Path $npmRoot 'npm'
             }
+            # Parcours les packages installés globalement
+            $found = Get-ChildItem $npmRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                $testPath = Join-Path $_.FullName 'node_modules\@npmcli\agent\lib\proxy.js'
+                if (Test-Path $testPath) { Split-Path $_.FullName -Parent }
+            } | Select-Object -First 1
+            if ($found) { return $found }
         }
     } catch {}
 
