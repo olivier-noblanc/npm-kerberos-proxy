@@ -25,7 +25,14 @@ l'installation npm locale.
    dans le profil utilisateur — typique avec nvm-windows) :
 
    ```powershell
-   .\Install-NpmKerberosProxy-win32-x64.ps1
+   # Si la politique d'exécution bloque le script :
+   powershell -ExecutionPolicy Bypass -File .\Install-NpmKerberosProxy-win32-x64.ps1
+   ```
+
+   Ou en une seule ligne dans PowerShell :
+
+   ```powershell
+   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass; .\Install-NpmKerberosProxy-win32-x64.ps1
    ```
 
 3. Vérifie :
