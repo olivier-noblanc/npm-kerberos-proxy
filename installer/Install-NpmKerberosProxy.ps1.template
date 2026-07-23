@@ -87,17 +87,21 @@ function Find-NpmInstall {
         $npmExe = (Get-Command npm -ErrorAction SilentlyContinue).Source
         if ($npmExe) {
             $npmItem = Get-Item $npmExe -ErrorAction SilentlyContinue
-            # scoop crée des .cmd/.ps1 dans persist/nodejs/bin ou apps/nodejs/current/bin
-            $dir = $npmItem.Directory
-            while ($dir -and $dir.Name -ne 'nodejs') { $dir = $dir.Parent }
-            if ($dir) {
-                $resolved = (Get-Item $dir.FullName -ErrorAction SilentlyContinue).Target
-                if ($resolved) { $dir = Get-Item $resolved -ErrorAction SilentlyContinue }
-                if ($dir) {
-                    $npm = Join-Path $dir.FullName 'node_modules\npm'
+            # npm.ps1 est dans scoop/apps/nodejs/current/
+            $currentDir = $npmItem.Directory
+            if ($currentDir -and $currentDir.Name -eq 'current') {
+                # Résout current → 26.5.0
+                $resolved = (Get-Item $currentDir.FullName -ErrorAction SilentlyContinue).Target
+                if ($resolved) {
+                    $npm = Join-Path $resolved 'node_modules\npm'
                     if (Test-Path (Join-Path $npm 'node_modules\@npmcli\agent\lib\proxy.js')) {
                         return $npm
                     }
+                }
+                # Fallback : cherche directement dans current
+                $npm = Join-Path $currentDir.FullName 'node_modules\npm'
+                if (Test-Path (Join-Path $npm 'node_modules\@npmcli\agent\lib\proxy.js')) {
+                    return $npm
                 }
             }
         }
