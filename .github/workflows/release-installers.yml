@@ -1,0 +1,64 @@
+name: Release installers
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    env:
+      KERBEROS_VERSION: '7.0.0'
+      NAPI_VERSION: '9'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Télécharger le prebuild kerberos officiel (win32-${{ matrix.arch }})
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          asset="kerberos-v${KERBEROS_VERSION}-napi-v${NAPI_VERSION}-win32-${{ matrix.arch }}.tar.gz"
+          url="https://github.com/mongodb-js/kerberos/releases/download/v${KERBEROS_VERSION}/${asset}"
+          curl -sL -H "Authorization: token $GH_TOKEN" -o kerberos.tar.gz "$url"
+          mkdir kerberos_extract
+          tar -xzf kerberos.tar.gz -C kerberos_extract
+          find kerberos_extract -name "*.node"
+
+      - name: Récupérer lib/index.js + lib/util.js du package npm officiel
+        run: |
+          npm pack kerberos@${KERBEROS_VERSION}
+          tar -xzf kerberos-${KERBEROS_VERSION}.tgz
+
+      - name: Générer l'installeur
+        run: |
+          python3 build/generate_installer.py \
+            --template installer/Install-NpmKerberosProxy.ps1.template \
+            --kerberos-node kerberos_extract/build/Release/kerberos.node \
+            --kerberos-index package/lib/index.js \
+            --kerberos-util package/lib/util.js \
+            --agent-js src/kerberos-proxy-agent.js \
+            --arch ${{ matrix.arch }} \
+            --output Install-NpmKerberosProxy-win32-${{ matrix.arch }}.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.arch }}
+          path: Install-NpmKerberosProxy-win32-${{ matrix.arch }}.ps1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.ps1
