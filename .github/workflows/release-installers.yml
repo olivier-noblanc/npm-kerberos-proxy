@@ -43,6 +43,7 @@ jobs:
             --kerberos-index package/lib/index.js \
             --kerberos-util package/lib/util.js \
             --agent-js src/kerberos-proxy-agent.js \
+            --kerberos-version $KERBEROS_VERSION \
             --arch ${{ matrix.arch }} \
             --output Install-NpmKerberosProxy-win32-${{ matrix.arch }}.ps1
 
